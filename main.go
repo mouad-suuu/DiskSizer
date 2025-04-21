@@ -4,13 +4,19 @@ import (
 	cli "DiskSizer/CLI"
 	utils "DiskSizer/Utils"
 	"fmt"
+
+	"github.com/fatih/color"
 )
+
 func main() {
 	timer := utils.StartTimer()
-	
-	// Initialize the CLI application
-	fmt.Println("Welcome to you storage monitoring service ");
+
+	// Fancy welcome message
+	welcome := color.New(color.FgHiBlue, color.Bold).SprintFunc()
+	fmt.Println(welcome("\n🚀 Welcome to your storage monitoring service"))
+
 	cli.Execute()
-	fmt.Printf("Process time: %.3f s\n", timer.Elapsed())
-	
+
+	elapsed := timer.Elapsed()
+	color.New(color.FgHiMagenta).Printf("⏱️  Process time: %.3f s\n", elapsed)
 }

@@ -3,9 +3,12 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strings"
-
 	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/fatih/color"
 
 	"strconv"
 
@@ -50,24 +53,41 @@ var scanCmd = &cobra.Command{
 	},
 }
 func scan(path string, depth int) {
-	fmt.Printf("Scanning path: %s\n", filepath.Clean(path))
-	fmt.Printf("Scan depth: %d\n\n", depth)
+	label := color.New(color.FgGreen).SprintFunc()
+	value := color.New(color.FgHiWhite).SprintFunc()
 
-	root, skippedSize, err := scanDir(path, depth, 0)
+	fmt.Printf("\n%s %s\n", label("📂 Scanning path:"), value(filepath.Clean(path)))
+	fmt.Printf("%s %d\n\n", label("🔎 Scan depth:"), depth)
+
+	var processedSize int64
+	startSpinner("Scanning...", &processedSize)
+
+	start := time.Now()
+	root, skippedSize, err := scanDir(path, depth, 0, &processedSize)
+
+	spinnerDone <- true
+	fmt.Printf("\r") // Clear spinner line
 	if err != nil {
-		fmt.Printf("Error scanning path: %v\n", err)
+		color.Red("❌ Error scanning path: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Total accessible size: %s\n\n", formatSize(root.Size))
+	fmt.Printf("✅ Scan complete in %s\n", time.Since(start).Truncate(time.Millisecond))
+	fmt.Printf("%s %s\n\n", label("📦 Total accessible size:"), value(formatSize(root.Size)))
 	printEntry(root, root.Size, 0, depth)
 
 	if skippedSize > 0 {
 		total := root.Size + skippedSize
 		percent := float64(skippedSize) / float64(total) * 100
-		fmt.Printf("\n⚠️  Skipped files/folders due to permission or errors: %s (%.2f%%)\n", formatSize(skippedSize), percent)
+		fmt.Printf("\n%s %s (%.2f%%)\n",
+			color.New(color.FgHiRed, color.Bold).Sprint("⚠️  Skipped due to errors/permissions:"),
+			value(formatSize(skippedSize)),
+			percent,
+		)
 	}
 }
+
+
 
 
 type DirEntry struct {
@@ -77,7 +97,7 @@ type DirEntry struct {
 	Children []DirEntry
 }
 
-func scanDir(path string, maxDepth int, currentDepth int) (DirEntry, int64, error) {
+func scanDir(path string, maxDepth, currentDepth int, processedSize *int64) (DirEntry, int64, error) {
 	entry := DirEntry{
 		Path: path,
 		Name: filepath.Base(path),
@@ -89,20 +109,18 @@ func scanDir(path string, maxDepth int, currentDepth int) (DirEntry, int64, erro
 	}
 	if !info.IsDir() {
 		entry.Size = info.Size()
+		atomic.AddInt64(processedSize, entry.Size)
 		return entry, 0, nil
 	}
 
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		return entry, info.Size(), nil // Count whole folder as skipped
+		return entry, info.Size(), nil
 	}
 
-	var totalSize int64
-	var skipped int64
+	var totalSize, skipped int64
 	for _, e := range entries {
 		fullPath := filepath.Join(path, e.Name())
-
-		// Avoid symlink loops
 		childInfo, err := os.Lstat(fullPath)
 		if err != nil || childInfo.Mode()&os.ModeSymlink != 0 {
 			if err != nil {
@@ -111,7 +129,7 @@ func scanDir(path string, maxDepth int, currentDepth int) (DirEntry, int64, erro
 			continue
 		}
 
-		childEntry, skippedChild, err := scanDir(fullPath, maxDepth, currentDepth+1)
+		childEntry, skippedChild, err := scanDir(fullPath, maxDepth, currentDepth+1, processedSize)
 		if err != nil {
 			skipped += childInfo.Size()
 			continue
@@ -120,16 +138,43 @@ func scanDir(path string, maxDepth int, currentDepth int) (DirEntry, int64, erro
 		totalSize += childEntry.Size
 		skipped += skippedChild
 	}
-
 	entry.Size = totalSize
+	atomic.AddInt64(processedSize, entry.Size)
 	return entry, skipped, nil
 }
+
 
 
 func printEntry(e DirEntry, total int64, level int, maxDepth int) {
 	indent := strings.Repeat("  ", level)
 	percent := float64(e.Size) / float64(total) * 100
-	fmt.Printf("%s%s: %s (%.2f%%)\n", indent, e.Name, formatSize(e.Size), percent)
+
+	// Color setup
+	nameColor := color.New(color.FgHiCyan).SprintFunc()
+	sizeColor := color.New(color.FgHiWhite).SprintFunc()
+	icon := "📁"
+	if len(e.Children) == 0 {
+		icon = "📄"
+	}
+
+	// Dynamic percentage color
+	var percentColor *color.Color
+	switch {
+	case percent <= 7:
+		percentColor = color.New(color.FgGreen)
+	case percent <= 30:
+		percentColor = color.New(color.FgBlue)
+	case percent <= 50:
+		percentColor = color.New(color.FgMagenta)
+	default:
+		percentColor = color.New(color.FgRed)
+	}
+
+	name := fmt.Sprintf("%s %s", icon, nameColor(e.Name))
+	size := fmt.Sprintf("%9s", formatSize(e.Size))
+	percentStr := fmt.Sprintf("(%6.2f%%)", percent)
+
+	fmt.Printf("%s%-30s %s %s\n", indent, name, sizeColor(size), percentColor.Sprint(percentStr))
 
 	if level+1 < maxDepth {
 		for _, child := range e.Children {
@@ -137,6 +182,10 @@ func printEntry(e DirEntry, total int64, level int, maxDepth int) {
 		}
 	}
 }
+
+
+
+
 
 func formatSize(size int64) string {
 	const (
@@ -158,6 +207,26 @@ func formatSize(size int64) string {
 	default:
 		return fmt.Sprintf("%d B", size)
 	}
+}
+var spinnerDone = make(chan bool)
+
+func startSpinner(label string, processedSize *int64) {
+	symbols := []string{"|", "/", "-", "\\"}
+	i := 0
+
+	go func() {
+		for {
+			select {
+			case <-spinnerDone:
+				return
+			default:
+				size := atomic.LoadInt64(processedSize)
+				fmt.Printf("\r%s %s Scanned: %s", color.YellowString(symbols[i%len(symbols)]), label, formatSize(size))
+				time.Sleep(100 * time.Millisecond)
+				i++
+			}
+		}
+	}()
 }
 
 

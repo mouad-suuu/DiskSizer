@@ -13,7 +13,7 @@ func main() {
 
 	// Fancy welcome message
 	welcome := color.New(color.FgHiBlue, color.Bold).SprintFunc()
-	fmt.Println(welcome("\n🚀 Welcome to your storage monitoring service"))
+	fmt.Println(welcome("\n🚀 Welcome to DiskSizer, your storage monitoring service"))
 
 	cli.Execute()
 

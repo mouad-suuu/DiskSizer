@@ -54,6 +54,12 @@ func (b *StyleBuilder) WithBold() *StyleBuilder {
 	b.options.Bold = true
 	return b
 }
+func getUsageColor(percent float64) tcell.Color {
+	// From green (0,255,0) to red (255,0,0)
+	red := int(255 * (percent / 100))
+	green := int(255 * ((100 - percent) / 100))
+	return tcell.NewRGBColor(int32(red), int32(green), 0)
+}
 
 // WithItalic sets the italic attribute
 func (b *StyleBuilder) WithItalic() *StyleBuilder {
@@ -188,14 +194,14 @@ func InstallClickHandler(textView *tview.TextView, app *tview.Application) {
 }
 
 // CreateInfoText creates styled informational text
-func CreateInfoText(label, value string) string {
+func CreateInfoText(label, value string, valueColor tcell.Color) string {
 	labelStyle := NewStyleBuilder().
 		WithBold().
-		WithTextColor(tcell.ColorGreen).
+		WithTextColor(tcell.ColorWhite).
 		Build()
 
 	valueStyle := NewStyleBuilder().
-		WithTextColor(tcell.ColorWhite).
+		WithTextColor(valueColor).
 		Build()
 
 	styledLabel := ApplyStyle(label, labelStyle)

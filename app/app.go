@@ -3,6 +3,7 @@ package app
 import (
 	"DiskSizer/Utils"
 	"DiskSizer/styling"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -11,13 +12,14 @@ import (
 )
 
 var (
-	app         *tview.Application
-	flex        *tview.Flex
-	treeView    *tview.TreeView
-	statsView   *tview.TextView
-	headerView  *tview.TextView
-	footerView  *tview.TextView
-	currentPath string
+	app          *tview.Application
+	flex         *tview.Flex
+	treeView     *tview.TreeView
+	statsView    *tview.TextView
+	progressView *tview.TextView
+	headerView   *tview.TextView
+	footerView   *tview.TextView
+	currentPath  string
 )
 
 func StartApp(startPath string) {
@@ -59,6 +61,13 @@ func StartApp(startPath string) {
 
 	// Update stats with interactive elements
 	updateStats()
+	progressView = tview.NewTextView().
+		SetChangedFunc(func() {
+			app.Draw()
+		})
+
+	// Install handler for clickable elements
+	styling.InstallClickHandler(progressView, app)
 
 	// Create tree view
 	rootDir := filepath.Base(startPath)
@@ -120,6 +129,7 @@ func StartApp(startPath string) {
 		SetDirection(tview.FlexRow).
 		AddItem(headerView, 1, 0, false).
 		AddItem(statsView, 8, 0, false).
+		AddItem(progressView, 1, 0, false).
 		AddItem(treeView, 0, 1, true).
 		AddItem(footerView, 1, 0, false)
 
@@ -157,38 +167,40 @@ func updateStats() {
 
 func addChildren(node *tview.TreeNode) {
 	path := node.GetReference().(string)
-	files, err := os.ReadDir(path)
-	if err != nil {
-		return
-	}
+	var processedSize int64
 
-	// Clear existing children
-	node.ClearChildren()
+	go func() {
+		app.QueueUpdateDraw(func() {
+			// Start the spinner without assigning its return value
+			scanner := Utils.StartSpinner("", &processedSize)
+			progressView.SetText(scanner)
+		})
 
-	// Add directories first
-	for _, file := range files {
-		if file.IsDir() {
-			childPath := filepath.Join(path, file.Name())
-			childNode := tview.NewTreeNode(file.Name()).
-				SetReference(childPath).
-				SetSelectable(true).
-				SetColor(tcell.ColorGreen)
-			node.AddChild(childNode)
+		dirEntry, _, err := Utils.ScanDir(path, 1, 0, &processedSize)
+		if err != nil {
+			app.QueueUpdateDraw(func() {
+				statsView.SetText("[red]Error scanning path")
+			})
+			return
 		}
-	}
 
-	// Then add files
-	for _, file := range files {
-		if !file.IsDir() {
-			childPath := filepath.Join(path, file.Name())
-			icon := getFileIcon(file.Name())
-			childNode := tview.NewTreeNode(icon + " " + file.Name()).
-				SetReference(childPath).
-				SetSelectable(true).
-				SetColor(tcell.ColorWhite)
-			node.AddChild(childNode)
-		}
-	}
+		app.QueueUpdateDraw(func() {
+			node.ClearChildren()
+			for _, child := range dirEntry.Children {
+				icon := getFileIcon(child.Name)
+				display := fmt.Sprintf("%s %s  [gray](%s)", icon, child.Name, Utils.FormatSize(child.Size))
+				childNode := tview.NewTreeNode(display).
+					SetReference(filepath.Join(path, child.Name)).
+					SetSelectable(true).
+					SetColor(tcell.ColorWhite)
+				if len(child.Children) > 0 {
+					childNode.SetColor(tcell.ColorGreen)
+				}
+				node.AddChild(childNode)
+			}
+			progressView.SetText("Scanning... " + Utils.FormatSize(processedSize))
+		})
+	}()
 }
 
 func getFileIcon(filename string) string {

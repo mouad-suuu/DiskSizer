@@ -15,10 +15,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
 type Entry struct {
-	Name string
-	Size int64
+	Name     string
+	Size     int64
 	Children []Entry
 }
 
@@ -52,6 +51,7 @@ var scanCmd = &cobra.Command{
 		scan(path, depth)
 	},
 }
+
 func scan(path string, depth int) {
 	label := color.New(color.FgGreen).SprintFunc()
 	value := color.New(color.FgHiWhite).SprintFunc()
@@ -60,7 +60,7 @@ func scan(path string, depth int) {
 	fmt.Printf("%s %d\n\n", label("🔎 Scan depth:"), depth)
 
 	var processedSize int64
-	startSpinner("Scanning...", &processedSize)
+	StartSpinner("Scanning...", &processedSize)
 
 	start := time.Now()
 	root, skippedSize, err := scanDir(path, depth, 0, &processedSize)
@@ -86,9 +86,6 @@ func scan(path string, depth int) {
 		)
 	}
 }
-
-
-
 
 type DirEntry struct {
 	Path     string
@@ -143,8 +140,6 @@ func scanDir(path string, maxDepth, currentDepth int, processedSize *int64) (Dir
 	return entry, skipped, nil
 }
 
-
-
 func printEntry(e DirEntry, total int64, level int, maxDepth int) {
 	indent := strings.Repeat("  ", level)
 	percent := float64(e.Size) / float64(total) * 100
@@ -183,10 +178,6 @@ func printEntry(e DirEntry, total int64, level int, maxDepth int) {
 	}
 }
 
-
-
-
-
 func formatSize(size int64) string {
 	const (
 		KB = 1 << 10
@@ -208,9 +199,10 @@ func formatSize(size int64) string {
 		return fmt.Sprintf("%d B", size)
 	}
 }
+
 var spinnerDone = make(chan bool)
 
-func startSpinner(label string, processedSize *int64) {
+func StartSpinner(label string, processedSize *int64) {
 	symbols := []string{"|", "/", "-", "\\"}
 	i := 0
 
@@ -228,7 +220,6 @@ func startSpinner(label string, processedSize *int64) {
 		}
 	}()
 }
-
 
 func init() {
 	rootCmd.AddCommand(scanCmd)

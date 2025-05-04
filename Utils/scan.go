@@ -1,14 +1,11 @@
 package Utils
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync/atomic"
-	"time"
-
-	"github.com/fatih/color"
 )
 
 type DirEntry struct {
@@ -59,6 +56,12 @@ func ScanDir(path string, maxDepth, currentDepth int, processedSize *int64) (Dir
 		totalSize += childEntry.Size
 		skipped += skippedChild
 	}
+
+	// Sort children by size (larger files first)
+	sort.Slice(entry.Children, func(i, j int) bool {
+		return entry.Children[i].Size > entry.Children[j].Size
+	})
+
 	entry.Size = totalSize
 	atomic.AddInt64(processedSize, entry.Size)
 	return entry, skipped, nil
@@ -90,47 +93,7 @@ func formatFloat(f float64) string {
 	return strconv.FormatFloat(f, 'f', 2, 64)
 }
 
-var spinnerDone = make(chan bool)
-var size int64
-
-func StartSpinner(processedSize *int64) string {
-	symbols := []string{"|", "/", "-", "\\"}
-	i := 0
-
-	go func() {
-		for {
-			select {
-			case <-spinnerDone:
-				return
-			default:
-				size = atomic.LoadInt64(processedSize)
-				fmt.Printf("\r%s Scanned: %s", color.YellowString(symbols[i%len(symbols)]), formatSize(size))
-				time.Sleep(100 * time.Millisecond)
-				i++
-			}
-		}
-	}()
-	return fmt.Sprintf("\r%s Scanned: %s", color.YellowString(symbols[i%len(symbols)]), formatSize(size))
-}
-
-func formatSize(size int64) string {
-	const (
-		KB = 1 << 10
-		MB = 1 << 20
-		GB = 1 << 30
-		TB = 1 << 40
-	)
-
-	switch {
-	case size >= TB:
-		return fmt.Sprintf("%.2f TB", float64(size)/TB)
-	case size >= GB:
-		return fmt.Sprintf("%.2f GB", float64(size)/GB)
-	case size >= MB:
-		return fmt.Sprintf("%.2f MB", float64(size)/MB)
-	case size >= KB:
-		return fmt.Sprintf("%.2f KB", float64(size)/KB)
-	default:
-		return fmt.Sprintf("%d B", size)
-	}
+// GetSpinnerChars returns a slice of spinner animation characters
+func GetSpinnerChars() []string {
+	return []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 }

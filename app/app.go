@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -20,6 +21,7 @@ var (
 	headerView  *tview.TextView
 	footerView  *tview.TextView
 	currentPath string
+	spinnerText string
 )
 
 func StartApp(startPath string) {
@@ -46,6 +48,9 @@ func StartApp(startPath string) {
 		SetText(headerText).
 		SetTextAlign(tview.AlignCenter).
 		SetDynamicColors(true)
+
+	// Initialize spinner text
+	spinnerText = ""
 
 	// Create stats view with interactive elements
 	statsView = tview.NewTextView().
@@ -117,7 +122,7 @@ func StartApp(startPath string) {
 		SetTextAlign(tview.AlignCenter).
 		SetDynamicColors(true)
 
-	// Create layout with progress view at the top
+	// Create layout without separate progress view
 	flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(headerView, 1, 0, false).
@@ -161,30 +166,71 @@ func addChildren(node *tview.TreeNode) {
 	path := node.GetReference().(string)
 	var processedSize int64
 
-	go func() {
-		app.QueueUpdateDraw(func() {
-			// Start the spinner and show it on the progressView at the top
-			// scanner := Utils.StartSpinner(&processedSize)
-			// progressView.SetText(scanner)
-		})
+	// Create a spinner node that will appear at the top of the tree
+	spinnerNode := tview.NewTreeNode("").SetSelectable(false)
+	node.AddChild(spinnerNode)
 
+	go func() {
+		// Start the spinner
+		stopSpinner := make(chan bool)
+		spinnerActive := true
+
+		// Run the spinner in a separate goroutine
+		go func() {
+			symbols := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+			i := 0
+			for {
+				select {
+				case <-stopSpinner:
+					return
+				default:
+					if spinnerActive {
+						app.QueueUpdateDraw(func() {
+							spinnerText = fmt.Sprintf("%s[yellow] Scanning directory... [blue]Processed: %s",
+								symbols[i%len(symbols)], Utils.FormatSize(processedSize))
+							spinnerNode.SetText(spinnerText)
+						})
+					}
+					time.Sleep(100 * time.Millisecond)
+					i++
+				}
+			}
+		}()
+
+		// Perform the actual directory scan
 		dirEntry, _, err := Utils.ScanDir(path, 1, 0, &processedSize)
+		spinnerActive = false
+		close(stopSpinner)
+
 		if err != nil {
 			app.QueueUpdateDraw(func() {
 				statsView.SetText("[red]Error scanning path")
-				// progressView.SetText("")
+				// Remove spinner node
+				node.RemoveChild(spinnerNode)
+				// Add error node
+				errorNode := tview.NewTreeNode("[red]Error scanning directory").SetSelectable(false)
+				node.AddChild(errorNode)
 			})
 			return
 		}
 
 		app.QueueUpdateDraw(func() {
-			node.ClearChildren()
+			// Remove the spinner node
+			node.RemoveChild(spinnerNode)
 
 			// Sort children by size (larger files first)
 			sort.Slice(dirEntry.Children, func(i, j int) bool {
 				return dirEntry.Children[i].Size > dirEntry.Children[j].Size
 			})
 
+			// Add a status node at the top showing scan results
+			statusNode := tview.NewTreeNode(fmt.Sprintf("[blue]Scanned: %s - %d items[/blue]",
+				Utils.FormatSize(dirEntry.Size), len(dirEntry.Children))).
+				SetSelectable(false).
+				SetColor(tcell.ColorBlue)
+			node.AddChild(statusNode)
+
+			// Add all the directory entries
 			for _, child := range dirEntry.Children {
 				icon := getFileIcon(child.Name, len(child.Children) > 0)
 				display := fmt.Sprintf("%s %s  [gray](%s)", icon, child.Name, Utils.FormatSize(child.Size))
@@ -200,7 +246,6 @@ func addChildren(node *tview.TreeNode) {
 
 				node.AddChild(childNode)
 			}
-			// progressView.SetText("Scanned: " + Utils.FormatSize(processedSize))
 		})
 	}()
 }
@@ -288,6 +333,9 @@ func refreshCurrentDir() {
 	if node == nil {
 		return
 	}
+
+	// Clear existing children
+	node.ClearChildren()
 
 	// Refresh the children
 	addChildren(node)

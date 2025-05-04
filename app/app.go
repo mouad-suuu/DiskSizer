@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -14,18 +15,28 @@ import (
 )
 
 var (
-	app         *tview.Application
-	flex        *tview.Flex
-	treeView    *tview.TreeView
-	statsView   *tview.TextView
-	headerView  *tview.TextView
-	footerView  *tview.TextView
-	currentPath string
-	spinnerText string
+	app           *tview.Application
+	flex          *tview.Flex
+	treeView      *tview.TreeView
+	statsView     *tview.TextView
+	headerView    *tview.TextView
+	footerView    *tview.TextView
+	currentPath   string
+	spinnerText   string
+	processedSize int64
+	ProcessedTime float64
+	// New variables for enhanced performance
+	dirCache    *Utils.DirSizeCache
+	scanCancel  chan bool
+	scanMutex   sync.Mutex
+	isScanning  bool
+	lastRefresh time.Time
 )
 
 func StartApp(startPath string) {
 	app = tview.NewApplication()
+	dirCache = Utils.NewDirSizeCache()
+	scanCancel = make(chan bool, 1)
 
 	// If no start path provided, use current directory
 	if startPath == "" {
@@ -111,11 +122,11 @@ func StartApp(startPath string) {
 		}
 	})
 
-	// Create styled footer
+	// Create styled footer with additional key mappings
 	footerStyle := styling.NewStyleBuilder().
 		WithTextColor(tcell.ColorGray).
 		Build()
-	footerText := styling.ApplyStyle("ENTER: Open/Collapse | BACKSPACE: Back | Q: Quit | SPACE: Refresh", footerStyle)
+	footerText := styling.ApplyStyle("ENTER: Open/Collapse | BACKSPACE: Back | Q: Quit | SPACE: Refresh | C: Clear Cache", footerStyle)
 
 	footerView = tview.NewTextView().
 		SetText(footerText).
@@ -145,6 +156,17 @@ func StartApp(startPath string) {
 				updateStats()
 				refreshCurrentDir()
 				return nil
+			case 'c', 'C':
+				clearCache()
+				return nil
+			case 'e', 'E':
+				// Quick estimate mode
+				estimateCurrentDir()
+				return nil
+			case 's', 'S':
+				// Stop current scan if running
+				cancelScan()
+				return nil
 			}
 		}
 		return event
@@ -162,15 +184,102 @@ func updateStats() {
 	statsView.SetText(statsText)
 }
 
-func addChildren(node *tview.TreeNode) {
+func clearCache() {
+	// Cancel any running scan
+	cancelScan()
+
+	// Clear the directory cache
+	dirCache.Clear()
+
+	// Update UI
+	app.QueueUpdateDraw(func() {
+		statsView.SetText("[yellow]Cache cleared. Press SPACE to refresh your view.")
+	})
+}
+
+func cancelScan() {
+	scanMutex.Lock()
+	defer scanMutex.Unlock()
+
+	if isScanning {
+		select {
+		case scanCancel <- true:
+			// Signal sent
+		default:
+			// Channel already has a signal
+		}
+
+		isScanning = false
+		app.QueueUpdateDraw(func() {
+			statsView.SetText("[yellow]Scan cancelled. Press SPACE to restart scan.")
+		})
+	}
+}
+
+func estimateCurrentDir() {
+	node := treeView.GetCurrentNode()
+	if node == nil {
+		return
+	}
+
 	path := node.GetReference().(string)
-	var processedSize int64
+
+	// Start the estimation in the background
+	go func() {
+		app.QueueUpdateDraw(func() {
+			statsView.SetText("[yellow]Estimating directory size...")
+		})
+
+		// Get a quick estimate using sampling
+		size, err := Utils.EstimateDirectorySize(path, 20)
+
+		app.QueueUpdateDraw(func() {
+			if err != nil {
+				statsView.SetText("[red]Error estimating directory size")
+			} else {
+				statsView.SetText(fmt.Sprintf("[green]Estimated Size: %s[white]\n(This is an approximate value based on sampling)",
+					Utils.FormatSize(size)))
+			}
+		})
+	}()
+}
+
+func addChildren(node *tview.TreeNode) {
+	scanMutex.Lock()
+	// If another scan is in progress, cancel it
+	if isScanning {
+		select {
+		case scanCancel <- true:
+			// Signal sent
+		default:
+			// Channel already has a signal
+		}
+	}
+
+	// Reset the cancel channel
+	select {
+	case <-scanCancel:
+		// Clear any existing signal
+	default:
+		// Channel already empty
+	}
+
+	isScanning = true
+	scanMutex.Unlock()
+
+	path := node.GetReference().(string)
 
 	// Create a spinner node that will appear at the top of the tree
 	spinnerNode := tview.NewTreeNode("").SetSelectable(false)
 	node.AddChild(spinnerNode)
 
 	go func() {
+		defer func() {
+			scanMutex.Lock()
+			isScanning = false
+			scanMutex.Unlock()
+		}()
+
 		// Start the spinner
 		stopSpinner := make(chan bool)
 		spinnerActive := true
@@ -179,15 +288,24 @@ func addChildren(node *tview.TreeNode) {
 		go func() {
 			symbols := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 			i := 0
+			startTime := time.Now()
+			ProcessedTime = 0
 			for {
 				select {
 				case <-stopSpinner:
 					return
+				case <-scanCancel:
+					app.QueueUpdateDraw(func() {
+						spinnerNode.SetText("[yellow]Scan cancelled")
+					})
+					return
 				default:
 					if spinnerActive {
+						elapsed := time.Since(startTime).Seconds()
+						ProcessedTime = elapsed
 						app.QueueUpdateDraw(func() {
-							spinnerText = fmt.Sprintf("%s[yellow] Scanning directory... [blue]Processed: %s",
-								symbols[i%len(symbols)], Utils.FormatSize(processedSize))
+							spinnerText = fmt.Sprintf("%s[yellow] Scanning directory... [blue]Processed: %s [gray](%.1fs)",
+								symbols[i%len(symbols)], Utils.FormatSize(processedSize), elapsed)
 							spinnerNode.SetText(spinnerText)
 						})
 					}
@@ -197,10 +315,46 @@ func addChildren(node *tview.TreeNode) {
 			}
 		}()
 
-		// Perform the actual directory scan
-		dirEntry, _, err := Utils.ScanDir(path, 1, 0, &processedSize)
+		// First check if we have this in the cache
+		if cachedEntry, found := dirCache.Get(path); found {
+			// Use the cached data instead of rescanning
+			spinnerActive = false
+			close(stopSpinner)
+
+			app.QueueUpdateDraw(func() {
+				// Remove the spinner node
+				node.RemoveChild(spinnerNode)
+
+				// Add a status node showing this is from cache
+				statusNode := tview.NewTreeNode(fmt.Sprintf("[green]From Cache: %s - %d items[/green]",
+					Utils.FormatSize(cachedEntry.Size), len(cachedEntry.Children))).
+					SetSelectable(false).
+					SetColor(tcell.ColorGreen)
+				node.AddChild(statusNode)
+
+				addDirEntryToNode(node, cachedEntry, path)
+			})
+			return
+		}
+
+		// Perform the actual directory scan with new cached method
+		dirEntry, skipped, err := Utils.CachedScanDir(path, 1, 0, &processedSize, dirCache)
 		spinnerActive = false
 		close(stopSpinner)
+
+		select {
+		case <-scanCancel:
+			app.QueueUpdateDraw(func() {
+				// Remove the spinner node
+				node.RemoveChild(spinnerNode)
+				// Add cancelled node
+				cancelledNode := tview.NewTreeNode("[yellow]Scan cancelled").SetSelectable(false)
+				node.AddChild(cancelledNode)
+			})
+			return
+		default:
+			// Continue processing
+		}
 
 		if err != nil {
 			app.QueueUpdateDraw(func() {
@@ -218,36 +372,68 @@ func addChildren(node *tview.TreeNode) {
 			// Remove the spinner node
 			node.RemoveChild(spinnerNode)
 
-			// Sort children by size (larger files first)
-			sort.Slice(dirEntry.Children, func(i, j int) bool {
-				return dirEntry.Children[i].Size > dirEntry.Children[j].Size
-			})
-
 			// Add a status node at the top showing scan results
-			statusNode := tview.NewTreeNode(fmt.Sprintf("[blue]Scanned: %s - %d items[/blue]",
-				Utils.FormatSize(dirEntry.Size), len(dirEntry.Children))).
+			statusNode := tview.NewTreeNode(fmt.Sprintf("[blue]Scanned: %s - %d items (Skipped: %s) [gray](%.1fs)",
+				Utils.FormatSize(dirEntry.Size), len(dirEntry.Children), Utils.FormatSize(skipped), ProcessedTime)).
 				SetSelectable(false).
 				SetColor(tcell.ColorBlue)
 			node.AddChild(statusNode)
 
-			// Add all the directory entries
-			for _, child := range dirEntry.Children {
-				icon := getFileIcon(child.Name, len(child.Children) > 0)
-				display := fmt.Sprintf("%s %s  [gray](%s)", icon, child.Name, Utils.FormatSize(child.Size))
-				childNode := tview.NewTreeNode(display).
-					SetReference(filepath.Join(path, child.Name)).
-					SetSelectable(true)
-
-				if len(child.Children) > 0 {
-					childNode.SetColor(tcell.ColorGreen)
-				} else {
-					childNode.SetColor(tcell.ColorWhite)
-				}
-
-				node.AddChild(childNode)
-			}
+			// Add directory entries to the node
+			addDirEntryToNode(node, dirEntry, path)
 		})
 	}()
+}
+
+// Helper function to add directory entries to a node
+func addDirEntryToNode(node *tview.TreeNode, dirEntry Utils.DirEntry, path string) {
+	// Sort children by size (larger files first)
+	sort.Slice(dirEntry.Children, func(i, j int) bool {
+		return dirEntry.Children[i].Size > dirEntry.Children[j].Size
+	})
+
+	// Add all the directory entries
+	for _, child := range dirEntry.Children {
+		isDir := len(child.Children) > 0
+		icon := getFileIcon(child.Name, isDir)
+
+		// Format size with different colors based on relative size
+		sizeColor := getSizeColor(child.Size, dirEntry.Size)
+		sizeText := fmt.Sprintf("[%s](%s)[white]", sizeColor, Utils.FormatSize(child.Size))
+
+		display := fmt.Sprintf("%s %s  %s", icon, child.Name, sizeText)
+		childNode := tview.NewTreeNode(display).
+			SetReference(filepath.Join(path, child.Name)).
+			SetSelectable(true)
+
+		if isDir {
+			childNode.SetColor(tcell.ColorGreen)
+		} else {
+			childNode.SetColor(tcell.ColorWhite)
+		}
+
+		node.AddChild(childNode)
+	}
+}
+
+// Helper function to get color based on relative size
+func getSizeColor(size, totalSize int64) string {
+	if totalSize == 0 {
+		return "white"
+	}
+
+	ratio := float64(size) / float64(totalSize)
+
+	switch {
+	case ratio > 0.5:
+		return "red"
+	case ratio > 0.25:
+		return "orange"
+	case ratio > 0.1:
+		return "yellow"
+	default:
+		return "green"
+	}
 }
 
 func getFileIcon(filename string, isDir bool) string {
@@ -328,6 +514,9 @@ func findNodeByPath(node *tview.TreeNode, targetPath string) *tview.TreeNode {
 }
 
 func refreshCurrentDir() {
+	// Cancel any ongoing scan first
+	cancelScan()
+
 	// Get current node
 	node := treeView.GetCurrentNode()
 	if node == nil {

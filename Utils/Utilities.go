@@ -138,3 +138,50 @@ func EstimateDirectorySize(path string, sampleSize int) (int64, error) {
 
 	return estimatedSize, nil
 }
+
+func GetSizeColor(size, totalSize int64) string {
+	if totalSize == 0 {
+		return "white"
+	}
+
+	ratio := float64(size) / float64(totalSize)
+
+	switch {
+	case ratio > 0.5:
+		return "red"
+	case ratio > 0.25:
+		return "orange"
+	case ratio > 0.1:
+		return "yellow"
+	default:
+		return "green"
+	}
+}
+
+func GetFileIcon(filename string, isDir bool) string {
+	if isDir {
+		return "📁" // Folder icon for directories
+	}
+
+	ext := filepath.Ext(filename)
+	switch ext {
+	case ".go":
+		return "🔷"
+	case ".txt", ".md":
+		return "📝"
+	case ".jpg", ".png", ".gif":
+		return "🖼️"
+	case ".mp3", ".wav":
+		return "🎵"
+	case ".mp4", ".avi", ".mov":
+		return "🎞️"
+	case ".pdf":
+		return "📕"
+	case ".zip", ".tar", ".gz":
+		return "📦"
+	case ".exe", ".app":
+		return "⚙️"
+	default:
+		return "📄"
+	}
+}

@@ -1,7 +1,6 @@
 package Utils
 
 import (
-	"DiskSizer/Cache"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -190,55 +189,4 @@ func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int
 	entry.Size = totalSize
 	atomic.AddInt64(processedSize, entry.Size)
 	return entry, skipped, nil
-}
-
-// ConvertToCacheEntry converts a Utils.DirEntry to a Cache.DirEntry
-func ConvertToCacheEntry(entry DirEntry) Cache.DirEntry {
-	cacheChildren := make([]Cache.DirEntry, len(entry.Children))
-	for i, child := range entry.Children {
-		cacheChildren[i] = ConvertToCacheEntry(child)
-	}
-
-	return Cache.DirEntry{
-		Path:     entry.Path,
-		Name:     entry.Name,
-		Size:     entry.Size,
-		Children: cacheChildren,
-	}
-}
-
-// ConvertFromCacheEntry converts a Cache.DirEntry to a Utils.DirEntry
-func ConvertFromCacheEntry(cacheEntry Cache.DirEntry) DirEntry {
-	children := make([]DirEntry, len(cacheEntry.Children))
-	for i, child := range cacheEntry.Children {
-		children[i] = ConvertFromCacheEntry(child)
-	}
-
-	return DirEntry{
-		Path:     cacheEntry.Path,
-		Name:     cacheEntry.Name,
-		Size:     cacheEntry.Size,
-		Children: children,
-	}
-}
-
-// CachedScanDir implements a caching layer on top of ScanDir
-func CachedScanDir(path string, maxDepth, currentDepth int, processedSize *int64, cache *Cache.DirSizeCache) (DirEntry, int64, error) {
-	// Check cache first
-	if cacheEntry, found := cache.Get(path); found {
-		// Convert from Cache.DirEntry to Utils.DirEntry
-		entry := ConvertFromCacheEntry(cacheEntry)
-		atomic.AddInt64(processedSize, entry.Size)
-		return entry, 0, nil
-	}
-
-	// Not in cache, scan normally
-	entry, skipped, err := ScanDir(path, maxDepth, currentDepth, processedSize)
-	if err == nil {
-		// Convert to Cache.DirEntry before adding to cache
-		cacheEntry := ConvertToCacheEntry(entry)
-		cache.Set(path, cacheEntry)
-	}
-
-	return entry, skipped, err
 }

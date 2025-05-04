@@ -93,7 +93,7 @@ func formatFloat(f float64) string {
 var spinnerDone = make(chan bool)
 var size int64
 
-func StartSpinner(label string, processedSize *int64) string {
+func StartSpinner(processedSize *int64) string {
 	symbols := []string{"|", "/", "-", "\\"}
 	i := 0
 
@@ -104,13 +104,13 @@ func StartSpinner(label string, processedSize *int64) string {
 				return
 			default:
 				size = atomic.LoadInt64(processedSize)
-				fmt.Printf("\r%s %s Scanned: %s", color.YellowString(symbols[i%len(symbols)]), label, formatSize(size))
+				fmt.Printf("\r%s Scanned: %s", color.YellowString(symbols[i%len(symbols)]), formatSize(size))
 				time.Sleep(100 * time.Millisecond)
 				i++
 			}
 		}
 	}()
-	return fmt.Sprintf("\r%s %s Scanned: %s", color.YellowString(symbols[i%len(symbols)]), label, formatSize(size))
+	return fmt.Sprintf("\r%s Scanned: %s", color.YellowString(symbols[i%len(symbols)]), formatSize(size))
 }
 
 func formatSize(size int64) string {

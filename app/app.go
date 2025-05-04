@@ -6,20 +6,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
 var (
-	app          *tview.Application
-	flex         *tview.Flex
-	treeView     *tview.TreeView
-	statsView    *tview.TextView
-	progressView *tview.TextView
-	headerView   *tview.TextView
-	footerView   *tview.TextView
-	currentPath  string
+	app         *tview.Application
+	flex        *tview.Flex
+	treeView    *tview.TreeView
+	statsView   *tview.TextView
+	headerView  *tview.TextView
+	footerView  *tview.TextView
+	currentPath string
 )
 
 func StartApp(startPath string) {
@@ -61,13 +61,6 @@ func StartApp(startPath string) {
 
 	// Update stats with interactive elements
 	updateStats()
-	progressView = tview.NewTextView().
-		SetChangedFunc(func() {
-			app.Draw()
-		})
-
-	// Install handler for clickable elements
-	styling.InstallClickHandler(progressView, app)
 
 	// Create tree view
 	rootDir := filepath.Base(startPath)
@@ -124,12 +117,11 @@ func StartApp(startPath string) {
 		SetTextAlign(tview.AlignCenter).
 		SetDynamicColors(true)
 
-	// Create layout
+	// Create layout with progress view at the top
 	flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(headerView, 1, 0, false).
-		AddItem(statsView, 8, 0, false).
-		AddItem(progressView, 1, 0, false).
+		AddItem(statsView, 7, 0, false).
 		AddItem(treeView, 0, 1, true).
 		AddItem(footerView, 1, 0, false)
 
@@ -171,39 +163,53 @@ func addChildren(node *tview.TreeNode) {
 
 	go func() {
 		app.QueueUpdateDraw(func() {
-			// Start the spinner without assigning its return value
-			scanner := Utils.StartSpinner("", &processedSize)
-			progressView.SetText(scanner)
+			// Start the spinner and show it on the progressView at the top
+			// scanner := Utils.StartSpinner(&processedSize)
+			// progressView.SetText(scanner)
 		})
 
 		dirEntry, _, err := Utils.ScanDir(path, 1, 0, &processedSize)
 		if err != nil {
 			app.QueueUpdateDraw(func() {
 				statsView.SetText("[red]Error scanning path")
+				// progressView.SetText("")
 			})
 			return
 		}
 
 		app.QueueUpdateDraw(func() {
 			node.ClearChildren()
+
+			// Sort children by size (larger files first)
+			sort.Slice(dirEntry.Children, func(i, j int) bool {
+				return dirEntry.Children[i].Size > dirEntry.Children[j].Size
+			})
+
 			for _, child := range dirEntry.Children {
-				icon := getFileIcon(child.Name)
+				icon := getFileIcon(child.Name, len(child.Children) > 0)
 				display := fmt.Sprintf("%s %s  [gray](%s)", icon, child.Name, Utils.FormatSize(child.Size))
 				childNode := tview.NewTreeNode(display).
 					SetReference(filepath.Join(path, child.Name)).
-					SetSelectable(true).
-					SetColor(tcell.ColorWhite)
+					SetSelectable(true)
+
 				if len(child.Children) > 0 {
 					childNode.SetColor(tcell.ColorGreen)
+				} else {
+					childNode.SetColor(tcell.ColorWhite)
 				}
+
 				node.AddChild(childNode)
 			}
-			progressView.SetText("Scanning... " + Utils.FormatSize(processedSize))
+			// progressView.SetText("Scanned: " + Utils.FormatSize(processedSize))
 		})
 	}()
 }
 
-func getFileIcon(filename string) string {
+func getFileIcon(filename string, isDir bool) string {
+	if isDir {
+		return "📁" // Folder icon for directories
+	}
+
 	ext := filepath.Ext(filename)
 	switch ext {
 	case ".go":

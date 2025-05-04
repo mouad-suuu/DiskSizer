@@ -1,17 +1,13 @@
 package Utils
 
 import (
-	"fmt"
+	"DiskSizer/Cache"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
-
-	"golang.org/x/sys/windows"
 )
 
 type DirEntry struct {
@@ -196,10 +192,42 @@ func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int
 	return entry, skipped, nil
 }
 
+// ConvertToCacheEntry converts a Utils.DirEntry to a Cache.DirEntry
+func ConvertToCacheEntry(entry DirEntry) Cache.DirEntry {
+	cacheChildren := make([]Cache.DirEntry, len(entry.Children))
+	for i, child := range entry.Children {
+		cacheChildren[i] = ConvertToCacheEntry(child)
+	}
+
+	return Cache.DirEntry{
+		Path:     entry.Path,
+		Name:     entry.Name,
+		Size:     entry.Size,
+		Children: cacheChildren,
+	}
+}
+
+// ConvertFromCacheEntry converts a Cache.DirEntry to a Utils.DirEntry
+func ConvertFromCacheEntry(cacheEntry Cache.DirEntry) DirEntry {
+	children := make([]DirEntry, len(cacheEntry.Children))
+	for i, child := range cacheEntry.Children {
+		children[i] = ConvertFromCacheEntry(child)
+	}
+
+	return DirEntry{
+		Path:     cacheEntry.Path,
+		Name:     cacheEntry.Name,
+		Size:     cacheEntry.Size,
+		Children: children,
+	}
+}
+
 // CachedScanDir implements a caching layer on top of ScanDir
-func CachedScanDir(path string, maxDepth, currentDepth int, processedSize *int64, cache *DirSizeCache) (DirEntry, int64, error) {
+func CachedScanDir(path string, maxDepth, currentDepth int, processedSize *int64, cache *Cache.DirSizeCache) (DirEntry, int64, error) {
 	// Check cache first
-	if entry, found := cache.Get(path); found {
+	if cacheEntry, found := cache.Get(path); found {
+		// Convert from Cache.DirEntry to Utils.DirEntry
+		entry := ConvertFromCacheEntry(cacheEntry)
 		atomic.AddInt64(processedSize, entry.Size)
 		return entry, 0, nil
 	}
@@ -207,172 +235,10 @@ func CachedScanDir(path string, maxDepth, currentDepth int, processedSize *int64
 	// Not in cache, scan normally
 	entry, skipped, err := ScanDir(path, maxDepth, currentDepth, processedSize)
 	if err == nil {
-		// Add to cache
-		cache.Set(path, entry)
+		// Convert to Cache.DirEntry before adding to cache
+		cacheEntry := ConvertToCacheEntry(entry)
+		cache.Set(path, cacheEntry)
 	}
 
 	return entry, skipped, err
-}
-
-// DirSizeCache provides caching for directory sizes
-type DirSizeCache struct {
-	cache map[string]DirEntry
-	mutex sync.RWMutex
-}
-
-// NewDirSizeCache creates a new directory size cache
-func NewDirSizeCache() *DirSizeCache {
-	return &DirSizeCache{
-		cache: make(map[string]DirEntry),
-	}
-}
-
-// Get retrieves a directory entry from the cache
-func (c *DirSizeCache) Get(path string) (DirEntry, bool) {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	entry, found := c.cache[path]
-	return entry, found
-}
-
-// Set adds a directory entry to the cache
-func (c *DirSizeCache) Set(path string, entry DirEntry) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.cache[path] = entry
-}
-
-// Clear empties the cache
-func (c *DirSizeCache) Clear() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.cache = make(map[string]DirEntry)
-}
-
-func FormatSize(size int64) string {
-	const (
-		KB = 1 << 10
-		MB = 1 << 20
-		GB = 1 << 30
-		TB = 1 << 40
-	)
-
-	switch {
-	case size >= TB:
-		return formatFloat(float64(size)/TB) + " TB"
-	case size >= GB:
-		return formatFloat(float64(size)/GB) + " GB"
-	case size >= MB:
-		return formatFloat(float64(size)/MB) + " MB"
-	case size >= KB:
-		return formatFloat(float64(size)/KB) + " KB"
-	default:
-		return formatFloat(float64(size)) + " B"
-	}
-}
-
-func formatFloat(f float64) string {
-	return strconv.FormatFloat(f, 'f', 2, 64)
-}
-
-func GetSpinnerChars() []string {
-	return []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-}
-
-// FastFileInfo provides quick file size estimation for large directories
-func FastFileInfo(path string) (int64, bool, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return 0, false, err
-	}
-
-	isDir := info.IsDir()
-	size := info.Size()
-
-	return size, isDir, nil
-}
-
-// GetUsableSpace returns the available disk space
-func GetUsableSpace(path string) (uint64, error) {
-	// Windows-specific implementation
-	if runtime.GOOS == "windows" {
-		// Get the volume path (e.g., C:\)
-		volumePath := filepath.VolumeName(path)
-		if volumePath == "" {
-			// If path doesn't have a volume name, use the current directory
-			cwd, err := os.Getwd()
-			if err != nil {
-				return 0, err
-			}
-			volumePath = filepath.VolumeName(cwd)
-		}
-
-		// Ensure volume path ends with separator
-		if !strings.HasSuffix(volumePath, "\\") {
-			volumePath += "\\"
-		}
-
-		// Use Windows API via golang.org/x/sys/windows
-		var free, total, totalFree uint64
-		windows.GetDiskFreeSpaceEx(
-			windows.StringToUTF16Ptr(volumePath),
-			&free,
-			&total,
-			&totalFree)
-
-		return free, nil
-	}
-
-	// For non-Windows platforms, return an error
-	return 0, fmt.Errorf("GetUsableSpace not implemented for %s", runtime.GOOS)
-}
-
-// EstimateDirectorySize provides a fast size estimate by sampling
-func EstimateDirectorySize(path string, sampleSize int) (int64, error) {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return 0, err
-	}
-
-	// For small directories, just get the exact size
-	if len(entries) <= sampleSize {
-		var size int64
-		for _, entry := range entries {
-			entryPath := filepath.Join(path, entry.Name())
-			entrySize, _, err := FastFileInfo(entryPath)
-			if err == nil {
-				size += entrySize
-			}
-		}
-		return size, nil
-	}
-
-	// For large directories, sample a subset
-	var totalSize int64
-	sampleCount := 0
-
-	// Pick evenly distributed samples
-	step := len(entries) / sampleSize
-	for i := 0; i < len(entries) && sampleCount < sampleSize; i += step {
-		if i >= len(entries) {
-			break
-		}
-
-		entryPath := filepath.Join(path, entries[i].Name())
-		entrySize, _, err := FastFileInfo(entryPath)
-		if err == nil {
-			totalSize += entrySize
-			sampleCount++
-		}
-	}
-
-	if sampleCount == 0 {
-		return 0, nil
-	}
-
-	// Extrapolate from samples
-	avgSize := totalSize / int64(sampleCount)
-	estimatedSize := avgSize * int64(len(entries))
-
-	return estimatedSize, nil
 }

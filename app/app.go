@@ -1,6 +1,7 @@
 package app
 
 import (
+	"DiskSizer/Cache"
 	"DiskSizer/Utils"
 	"DiskSizer/styling"
 	"fmt"
@@ -26,7 +27,7 @@ var (
 	processedSize int64
 	ProcessedTime float64
 	// New variables for enhanced performance
-	dirCache    *Utils.DirSizeCache
+	dirCache    *Cache.DirSizeCache
 	scanCancel  chan bool
 	scanMutex   sync.Mutex
 	isScanning  bool
@@ -35,7 +36,7 @@ var (
 
 func StartApp(startPath string) {
 	app = tview.NewApplication()
-	dirCache = Utils.NewDirSizeCache()
+	dirCache = Cache.NewDirSizeCache()
 	scanCancel = make(chan bool, 1)
 
 	// If no start path provided, use current directory
@@ -332,7 +333,9 @@ func addChildren(node *tview.TreeNode) {
 					SetColor(tcell.ColorGreen)
 				node.AddChild(statusNode)
 
-				addDirEntryToNode(node, cachedEntry, path)
+				// Convert the Cache.DirEntry to Utils.DirEntry
+				utilsEntry := Utils.ConvertFromCacheEntry(cachedEntry)
+				addDirEntryToNode(node, utilsEntry, path)
 			})
 			return
 		}

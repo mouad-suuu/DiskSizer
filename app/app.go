@@ -1,27 +1,42 @@
 package app
 
 import (
-	"DiskSizer/Utils"
+	cache "DiskSizer/Cache"
 	"DiskSizer/styling"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
+// Application global variables
 var (
-	app         *tview.Application
-	flex        *tview.Flex
-	treeView    *tview.TreeView
-	statsView   *tview.TextView
-	headerView  *tview.TextView
-	footerView  *tview.TextView
-	currentPath string
+	// UI components
+	app        *tview.Application
+	flex       *tview.Flex
+	treeView   *tview.TreeView
+	statsView  *tview.TextView
+	headerView *tview.TextView
+	footerView *tview.TextView
+
+	// State tracking - exported for use in other files
+	CurrentPath   string // Exported for use in navigation.go
+	processedSize int64
+	ProcessedTime float64
+
+	// Cache and scanning management
+	dirCache    *cache.DirSizeCache
+	scanCancel  chan bool
+	scanMutex   sync.Mutex
+	isScanning  bool
 )
 
 func StartApp(startPath string) {
 	app = tview.NewApplication()
+	dirCache = cache.NewDirSizeCache()
+	scanCancel = make(chan bool, 1)
 
 	// If no start path provided, use current directory
 	if startPath == "" {
@@ -31,7 +46,7 @@ func StartApp(startPath string) {
 			startPath = "/"
 		}
 	}
-	currentPath = startPath
+	CurrentPath = startPath
 
 	// Create styled header
 	headerStyle := styling.NewStyleBuilder().
@@ -44,6 +59,9 @@ func StartApp(startPath string) {
 		SetText(headerText).
 		SetTextAlign(tview.AlignCenter).
 		SetDynamicColors(true)
+
+	// Initialize processed size
+	processedSize = 0
 
 	// Create stats view with interactive elements
 	statsView = tview.NewTextView().
@@ -96,7 +114,7 @@ func StartApp(startPath string) {
 					addChildren(node)
 				}
 			}
-			currentPath = path
+			CurrentPath = path
 			updateStats()
 		} else {
 			// Handle file selection
@@ -104,22 +122,22 @@ func StartApp(startPath string) {
 		}
 	})
 
-	// Create styled footer
+	// Create styled footer with additional key mappings
 	footerStyle := styling.NewStyleBuilder().
 		WithTextColor(tcell.ColorGray).
 		Build()
-	footerText := styling.ApplyStyle("ENTER: Open/Collapse | BACKSPACE: Back | Q: Quit | SPACE: Refresh", footerStyle)
+	footerText := styling.ApplyStyle("ENTER: Open/Collapse | BACKSPACE: Back | Q: Quit | SPACE: Refresh | C: Clear Cache", footerStyle)
 
 	footerView = tview.NewTextView().
 		SetText(footerText).
 		SetTextAlign(tview.AlignCenter).
 		SetDynamicColors(true)
 
-	// Create layout
+	// Create layout without separate progress view
 	flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(headerView, 1, 0, false).
-		AddItem(statsView, 8, 0, false).
+		AddItem(statsView, 7, 0, false).
 		AddItem(treeView, 0, 1, true).
 		AddItem(footerView, 1, 0, false)
 
@@ -138,6 +156,17 @@ func StartApp(startPath string) {
 				updateStats()
 				refreshCurrentDir()
 				return nil
+			case 'c', 'C':
+				clearCache()
+				return nil
+			case 'e', 'E':
+				// Quick estimate mode
+				estimateCurrentDir()
+				return nil
+			case 's', 'S':
+				// Stop current scan if running
+				cancelScan()
+				return nil
 			}
 		}
 		return event
@@ -147,131 +176,4 @@ func StartApp(startPath string) {
 	if err := app.SetRoot(flex, true).EnableMouse(true).Run(); err != nil {
 		panic(err)
 	}
-}
-
-func updateStats() {
-	// Use the new interactive stats
-	statsText := Utils.GetDiskStatsInteractive(statsView, app)
-	statsView.SetText(statsText)
-}
-
-func addChildren(node *tview.TreeNode) {
-	path := node.GetReference().(string)
-	files, err := os.ReadDir(path)
-	if err != nil {
-		return
-	}
-
-	// Clear existing children
-	node.ClearChildren()
-
-	// Add directories first
-	for _, file := range files {
-		if file.IsDir() {
-			childPath := filepath.Join(path, file.Name())
-			childNode := tview.NewTreeNode(file.Name()).
-				SetReference(childPath).
-				SetSelectable(true).
-				SetColor(tcell.ColorGreen)
-			node.AddChild(childNode)
-		}
-	}
-
-	// Then add files
-	for _, file := range files {
-		if !file.IsDir() {
-			childPath := filepath.Join(path, file.Name())
-			icon := getFileIcon(file.Name())
-			childNode := tview.NewTreeNode(icon + " " + file.Name()).
-				SetReference(childPath).
-				SetSelectable(true).
-				SetColor(tcell.ColorWhite)
-			node.AddChild(childNode)
-		}
-	}
-}
-
-func getFileIcon(filename string) string {
-	ext := filepath.Ext(filename)
-	switch ext {
-	case ".go":
-		return "🔷"
-	case ".txt", ".md":
-		return "📝"
-	case ".jpg", ".png", ".gif":
-		return "🖼️"
-	case ".mp3", ".wav":
-		return "🎵"
-	case ".mp4", ".avi", ".mov":
-		return "🎞️"
-	case ".pdf":
-		return "📕"
-	case ".zip", ".tar", ".gz":
-		return "📦"
-	case ".exe", ".app":
-		return "⚙️"
-	default:
-		return "📄"
-	}
-}
-
-func navigateUp() {
-	// Get current node
-	node := treeView.GetCurrentNode()
-	if node == nil {
-		return
-	}
-
-	// Get the reference path
-	ref := node.GetReference()
-	if ref == nil {
-		return
-	}
-
-	path := ref.(string)
-	parentPath := filepath.Dir(path)
-
-	// Don't go above the initial directory
-	if parentPath == path {
-		return
-	}
-
-	// Find the parent node
-	root := treeView.GetRoot()
-	parentNode := findNodeByPath(root, parentPath)
-
-	if parentNode != nil {
-		treeView.SetCurrentNode(parentNode)
-		currentPath = parentPath
-		updateStats()
-	}
-}
-
-func findNodeByPath(node *tview.TreeNode, targetPath string) *tview.TreeNode {
-	// Check if this is the node we're looking for
-	ref := node.GetReference()
-	if ref != nil && ref.(string) == targetPath {
-		return node
-	}
-
-	// Check children
-	for _, child := range node.GetChildren() {
-		if found := findNodeByPath(child, targetPath); found != nil {
-			return found
-		}
-	}
-
-	return nil
-}
-
-func refreshCurrentDir() {
-	// Get current node
-	node := treeView.GetCurrentNode()
-	if node == nil {
-		return
-	}
-
-	// Refresh the children
-	addChildren(node)
-	app.Draw()
 }

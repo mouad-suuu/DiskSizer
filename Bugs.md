@@ -4,5 +4,5 @@
 
 ## bug 2: CLI results not silictable 
 
-- [ ] fix
+- [x] fix
 

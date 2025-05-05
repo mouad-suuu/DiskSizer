@@ -258,20 +258,19 @@ func CreateProgressBar(used float64, total float64, width int) string {
 		WithTextColor(barColor).
 		WithBackgroundColor(barColor).
 		Build()
+		// Add percentage text
+	percentText := fmt.Sprintf(" %.1f%%", percentage*100)
 	filled := strings.Repeat("█", filledWidth)
-	styledFilled := ApplyStyle(filled, filledStyle)
+	styledFilled := ApplyStyle((percentText + filled), filledStyle)
 
 	// Create the empty part
 	emptyStyle := NewStyleBuilder().
-		WithTextColor(tcell.ColorGray).
+		WithTextColor(tcell.ColorWhite).
 		Build()
 	empty := strings.Repeat("░", width-filledWidth)
 	styledEmpty := ApplyStyle(empty, emptyStyle)
 
-	// Add percentage text
-	percentText := fmt.Sprintf(" %.1f%%", percentage*100)
-
-	return styledFilled + styledEmpty + percentText
+	return styledFilled + styledEmpty
 }
 
 // SplitIntoPages splits long text into pages with given height

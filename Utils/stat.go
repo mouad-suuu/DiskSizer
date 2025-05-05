@@ -93,11 +93,9 @@ func GetDiskStatsInteractive(textView *tview.TextView, app *tview.Application) s
 
 // Implement these functions to handle the actions
 func exploreDirectory(path string, app *tview.Application) {
-	// This would be implemented to navigate to the selected directory
-	// You'll want to update your app state to show the selected directory
-}
-
-func analyzeSpaceUsage(path string, app *tview.Application) {
-	// This would be implemented to show detailed space analysis for the path
-	// Maybe display a modal or change to an analysis view
+	// This function is called when a disk partition is clicked
+	// It should update the app state to navigate to the selected directory
+	// You can implement the actual navigation logic here
+	// For example, you might want to call a function in the app package
+	// that updates the tree view to show the selected directory
 }

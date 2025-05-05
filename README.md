@@ -1,1 +1,1 @@
-# Treesize like app 
+# A Disk Size analyzer app 

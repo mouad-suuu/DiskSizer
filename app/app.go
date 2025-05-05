@@ -27,10 +27,10 @@ var (
 	ProcessedTime float64
 
 	// Cache and scanning management
-	dirCache    *cache.DirSizeCache
-	scanCancel  chan bool
-	scanMutex   sync.Mutex
-	isScanning  bool
+	dirCache   *cache.DirSizeCache
+	scanCancel chan bool
+	scanMutex  sync.Mutex
+	isScanning bool
 )
 
 func StartApp(startPath string) {

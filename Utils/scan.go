@@ -32,10 +32,12 @@ type ScanResult struct {
 
 // ScanDir scans a directory tree with parallel processing for better performance
 func ScanDir(path string, maxDepth, currentDepth int, processedSize *int64) (DirEntry, int64, error) {
+
 	// For small depths, use concurrent scanning for better performance
 	if maxDepth == 0 || currentDepth < 2 {
 		return scanDirParallel(path, maxDepth, currentDepth, processedSize)
 	}
+
 	return scanDirSequential(path, maxDepth, currentDepth, processedSize)
 }
 
@@ -46,7 +48,7 @@ func scanDirSequential(path string, maxDepth, currentDepth int, processedSize *i
 		Name: filepath.Base(path),
 	}
 
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return entry, 0, err
 	}
@@ -88,7 +90,7 @@ func scanDirSequential(path string, maxDepth, currentDepth int, processedSize *i
 	})
 
 	entry.Size = totalSize
-	atomic.AddInt64(processedSize, entry.Size)
+	// atomic.AddInt64(processedSize, entry.Size)
 	return entry, skipped, nil
 }
 
@@ -99,7 +101,7 @@ func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int
 		Name: filepath.Base(path),
 	}
 
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return entry, 0, err
 	}
@@ -187,6 +189,6 @@ func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int
 
 	entry.Children = children
 	entry.Size = totalSize
-	atomic.AddInt64(processedSize, entry.Size)
+	// atomic.AddInt64(processedSize, entry.Size)
 	return entry, skipped, nil
 }

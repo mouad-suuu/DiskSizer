@@ -11,7 +11,7 @@ import (
 	"github.com/rivo/tview"
 )
 
-// addChildren adds children to a tree node
+// addChildren adds children to a tree node with improved performance
 func addChildren(node *tview.TreeNode) {
 	scanMutex.Lock()
 	// If another scan is in progress, cancel it
@@ -83,6 +83,8 @@ func addChildren(node *tview.TreeNode) {
 			}
 		}()
 
+		// Check if this is a special path that requires different handling
+
 		// First check if we have this in the cache
 		if cachedEntry, found := dirCache.Get(path); found {
 			// Use the cached data instead of rescanning
@@ -110,45 +112,50 @@ func addChildren(node *tview.TreeNode) {
 		spinnerActive = false
 		close(stopSpinner)
 
-		select {
-		case <-scanCancel:
-			app.QueueUpdateDraw(func() {
-				// Remove the spinner node
-				node.RemoveChild(spinnerNode)
-				// Add cancelled node
-				cancelledNode := tview.NewTreeNode("[yellow]Scan cancelled").SetSelectable(false)
-				node.AddChild(cancelledNode)
-			})
-			return
-		default:
-			// Continue processing
-		}
+		handleScanResults(node, spinnerNode, path, dirEntry, skipped, err)
+	}()
+}
 
-		if err != nil {
-			app.QueueUpdateDraw(func() {
-				statsView.SetText("[red]Error scanning path")
-				// Remove spinner node
-				node.RemoveChild(spinnerNode)
-				// Add error node
-				errorNode := tview.NewTreeNode("[red]Error scanning directory").SetSelectable(false)
-				node.AddChild(errorNode)
-			})
-			return
-		}
-
+// handleScanResults processes the results of a directory scan
+func handleScanResults(node *tview.TreeNode, spinnerNode *tview.TreeNode, path string, dirEntry Utils.DirEntry, skipped int64, err error) {
+	select {
+	case <-scanCancel:
 		app.QueueUpdateDraw(func() {
 			// Remove the spinner node
 			node.RemoveChild(spinnerNode)
-
-			// Add a status node at the top showing scan results
-			statusNode := tview.NewTreeNode(fmt.Sprintf("[blue]Scanned: %s - %d items (Skipped: %s) [gray](%.1fs)",
-				Utils.FormatSize(dirEntry.Size), len(dirEntry.Children), Utils.FormatSize(skipped), ProcessedTime)).SetSelectable(false).SetColor(tcell.ColorBlue)
-			node.AddChild(statusNode)
-
-			// Add directory entries to the node
-			addDirEntryToNode(node, dirEntry, path)
+			// Add cancelled node
+			cancelledNode := tview.NewTreeNode("[yellow]Scan cancelled").SetSelectable(false)
+			node.AddChild(cancelledNode)
 		})
-	}()
+		return
+	default:
+		// Continue processing
+	}
+
+	if err != nil {
+		app.QueueUpdateDraw(func() {
+			statsView.SetText("[red]Error scanning path")
+			// Remove spinner node
+			node.RemoveChild(spinnerNode)
+			// Add error node
+			errorNode := tview.NewTreeNode("[red]Error scanning directory").SetSelectable(false)
+			node.AddChild(errorNode)
+		})
+		return
+	}
+
+	app.QueueUpdateDraw(func() {
+		// Remove the spinner node
+		node.RemoveChild(spinnerNode)
+
+		// Add a status node at the top showing scan results
+		statusNode := tview.NewTreeNode(fmt.Sprintf("[blue]Scanned: %s - %d items (Skipped: %s) [gray](%.1fs)",
+			Utils.FormatSize(dirEntry.Size), len(dirEntry.Children), Utils.FormatSize(skipped), ProcessedTime)).SetSelectable(false).SetColor(tcell.ColorBlue)
+		node.AddChild(statusNode)
+
+		// Add directory entries to the node
+		addDirEntryToNode(node, dirEntry, path)
+	})
 }
 
 // clearCache clears the directory cache

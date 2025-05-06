@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+
 	"sync"
 	"sync/atomic"
 )
@@ -30,46 +31,76 @@ type ScanResult struct {
 	Error   error
 }
 
-// ScanDir scans a directory tree with parallel processing for better performance
+// ScanDir scans a directory tree with adaptive parallel processing
 func ScanDir(path string, maxDepth, currentDepth int, processedSize *int64) (DirEntry, int64, error) {
+	// // Check if this is a known problematic directory that should be skipped or processed differently
+	baseName := filepath.Base(path)
+	// if skipDirs[baseName] {
+	// 	// For problematic directories, do a fast estimate instead of deep scanning
+	// 	entry := DirEntry{
+	// 		Path: path,
+	// 		Name: baseName,
+	// 	}
 
-	// For small depths, use concurrent scanning for better performance
-	if maxDepth == 0 || currentDepth < 2 {
-		return scanDirParallel(path, maxDepth, currentDepth, processedSize)
+	// 	// Quick size estimation for problematic directories
+	// 	size, err := EstimateDirectorySize(path, 10)
+	// 	if err != nil {
+	// 		return entry, 0, err
+	// 	}
+
+	// 	entry.Size = size
+	// 	// atomic.AddInt64(processedSize, entry.Size)
+	// 	return entry, 0, nil
+	// }
+
+	// Determine whether to use parallel or sequential scanning
+	// Use parallel scanning for:
+	// 1. Top-level directories (currentDepth < 2)
+	// 2. Directories with many entries regardless of depth
+	info, err := os.Lstat(path)
+	if err != nil {
+		return DirEntry{Path: path, Name: baseName}, 0, err
 	}
 
-	return scanDirSequential(path, maxDepth, currentDepth, processedSize)
+	if !info.IsDir() {
+		entry := DirEntry{
+			Path: path,
+			Name: baseName,
+			Size: info.Size(),
+		}
+		atomic.AddInt64(processedSize, entry.Size)
+		return entry, 0, nil
+	}
+
+	// Read directory entries to determine count
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return DirEntry{Path: path, Name: baseName, Size: info.Size()}, info.Size(), nil
+	}
+
+	// Use parallel scanning for directories with many entries or at shallow depths
+	if maxDepth == 0 || currentDepth < 2 || len(entries) > 20 {
+		return scanDirParallel(path, maxDepth, currentDepth, processedSize, entries)
+	}
+
+	return scanDirSequential(path, maxDepth, currentDepth, processedSize, entries)
 }
 
 // scanDirSequential performs a sequential directory scan (for deeper levels)
-func scanDirSequential(path string, maxDepth, currentDepth int, processedSize *int64) (DirEntry, int64, error) {
+func scanDirSequential(path string, maxDepth, currentDepth int, processedSize *int64, entries []os.DirEntry) (DirEntry, int64, error) {
 	entry := DirEntry{
 		Path: path,
 		Name: filepath.Base(path),
 	}
 
-	info, err := os.Lstat(path)
-	if err != nil {
-		return entry, 0, err
-	}
-	if !info.IsDir() {
-		entry.Size = info.Size()
-		atomic.AddInt64(processedSize, entry.Size)
-		return entry, 0, nil
-	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return entry, info.Size(), nil
-	}
-
 	var totalSize, skipped int64
 	for _, e := range entries {
 		fullPath := filepath.Join(path, e.Name())
+
 		childInfo, err := os.Lstat(fullPath)
 		if err != nil || childInfo.Mode()&os.ModeSymlink != 0 {
 			if err != nil {
-				skipped += info.Size()
+				skipped += 1024 // assume 1KB for error cases
 			}
 			continue
 		}
@@ -90,48 +121,40 @@ func scanDirSequential(path string, maxDepth, currentDepth int, processedSize *i
 	})
 
 	entry.Size = totalSize
-	// atomic.AddInt64(processedSize, entry.Size)
 	return entry, skipped, nil
 }
 
-// scanDirParallel performs a parallel directory scan using worker pools
-func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int64) (DirEntry, int64, error) {
+// scanDirParallel performs an optimized parallel directory scan
+func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int64, entries []os.DirEntry) (DirEntry, int64, error) {
 	entry := DirEntry{
 		Path: path,
 		Name: filepath.Base(path),
 	}
 
-	info, err := os.Lstat(path)
-	if err != nil {
-		return entry, 0, err
-	}
-	if !info.IsDir() {
-		entry.Size = info.Size()
-		atomic.AddInt64(processedSize, entry.Size)
-		return entry, 0, nil
-	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return entry, info.Size(), nil
-	}
-
-	// For small directories, just process sequentially
+	// For very small directories, just process sequentially
 	if len(entries) < 5 {
-		return scanDirSequential(path, maxDepth, currentDepth, processedSize)
+		return scanDirSequential(path, maxDepth, currentDepth, processedSize, entries)
 	}
 
 	var wg sync.WaitGroup
 	resultChan := make(chan ScanResult, len(entries))
-	workerCount := runtime.NumCPU()
 
-	// Create work queue
+	// Increase worker count for IO-bound operations
+	// Use 2-4x CPU count for better IO throughput
+	workerCount := runtime.NumCPU() * 3
+	if workerCount > 24 {
+		workerCount = 24 // Cap at reasonable maximum
+	}
+
+	// Create work queue with appropriate buffer size
 	workQueue := make(chan WorkItem, len(entries))
 
 	// Start worker goroutines
 	for i := 0; i < workerCount; i++ {
 		go func() {
 			for work := range workQueue {
+				// Check if this is a problematic directory before scanning
+
 				childEntry, childSkipped, childErr := ScanDir(work.Path, work.MaxDepth, work.CurrentDepth, processedSize)
 				resultChan <- ScanResult{
 					Entry:   childEntry,
@@ -143,8 +166,37 @@ func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int
 		}()
 	}
 
-	// Add work to the queue
+	// Process entries to create work items
+	// Group work items by priority (process regular files first, then directories)
+	var regularFiles []os.DirEntry
+	var directories []os.DirEntry
+
 	for _, e := range entries {
+		if e.IsDir() {
+			directories = append(directories, e)
+		} else {
+			regularFiles = append(regularFiles, e)
+		}
+	}
+
+	// Process regular files first (these are quick)
+	for _, e := range regularFiles {
+		fullPath := filepath.Join(path, e.Name())
+		childInfo, err := os.Lstat(fullPath)
+		if err != nil || childInfo.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+
+		wg.Add(1)
+		workQueue <- WorkItem{
+			Path:         fullPath,
+			MaxDepth:     maxDepth,
+			CurrentDepth: currentDepth + 1,
+		}
+	}
+
+	// Then process directories (potentially more time-consuming)
+	for _, e := range directories {
 		fullPath := filepath.Join(path, e.Name())
 		childInfo, err := os.Lstat(fullPath)
 		if err != nil || childInfo.Mode()&os.ModeSymlink != 0 {
@@ -189,6 +241,5 @@ func scanDirParallel(path string, maxDepth, currentDepth int, processedSize *int
 
 	entry.Children = children
 	entry.Size = totalSize
-	// atomic.AddInt64(processedSize, entry.Size)
 	return entry, skipped, nil
 }
